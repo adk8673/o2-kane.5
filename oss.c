@@ -7,6 +7,7 @@
 #include<signal.h>
 #include<stdio.h>
 #include<stdlib.h>
+#include<string.h>
 #include<sys/types.h>
 #include<sys/ipc.h>
 #include<sys/shm.h>
@@ -18,6 +19,7 @@
 //#include"ProcessControlBlock.h"
 //#include"ProcessUtilities.h"
 #include"ResourceDescriptor.h"
+#include"StringUtilities.h"
 
 #define MAX_REAL_SECONDS 2
 #define ID_SECONDS 1
@@ -27,6 +29,7 @@
 #define ID_MSG_CLOCK 5
 #define NUM_DIFF_RESOURCES 20
 #define MAX_RESOURCE_COUNT 10
+#define MAX_NUM_PROCESSES 1
 
 // Global definitions
 // Pointer to shared global seconds integer
@@ -62,20 +65,30 @@ typedef struct {
 	char mtext[50];
 } mymsg_t;
 
+// maximum number of global processes
+int maxNumProcesses = 0;
+
 void allocateAllSharedMemory();
 void deallocateAllSharedMemory();
 void handleInterruption(int);
 void initializeResourceDescriptor();
 void allocateAllMessageQueue();
 void deallocateAllMessageQueue();
+void checkCommandArgs(int, char**);
 
 int main(int argc, char** argv)
 {
 	// Set our global process name
 	processName = argv[0];
-
+	
 	// seed our random values
 	srand(time(0) * getpid());
+
+	// Intiailize our max number of child processes to default, can be cahnged by command line if passed
+	maxNumProcesses = MAX_NUM_PROCESSES;
+
+	// Check what was passed in from the command line
+	checkCommandArgs(argc, argv);
 		
 	// set our signal handlers
 	signal(SIGINT, handleInterruption);
@@ -92,9 +105,8 @@ int main(int argc, char** argv)
 
 	// populate our resource descriptor array with random resource counts
 	initializeResourceDescriptor();	
+	
 
-	printf("message queue test: %d %d\n", msgIdRequest, msgIdClock);
-	sleep(1000);
 	// deallocate all shared memory
 	deallocateAllSharedMemory();
 
@@ -103,6 +115,37 @@ int main(int argc, char** argv)
 
 	return 0;
 }
+
+// Check our arguments passed from the command line.  In this case, since we are only accepting the
+// -h option from the command line, we only need to return 1 int which indicates if a the help 
+// argument was passed.
+void checkCommandArgs(int argc, char** argv)
+{
+	int c;
+	while ((c = getopt(argc, argv, "hn:")) != -1)
+	{
+		switch (c)
+		{
+			case 'h':
+				printf("oss (second iteration):\nWhen ran (using the option ./oss), \n");
+				exit(0);
+				break;	
+			case 'n':
+				if (optarg != NULL && checkNumber(optarg))
+				{
+					maxNumProcesses = atoi(optarg);
+					if (maxNumProcesses > MAX_NUM_PROCESSES)
+						printf("Argument exceeed max number of child processes, using default of %d\n", MAX_NUM_PROCESSES);
+				}
+				else
+					printf("Invalid number of max children, will use default of %d\n", MAX_NUM_PROCESSES);
+				break;
+			default:
+				break;
+		}
+	}
+}
+
 
 void allocateAllMessageQueue()
 {
