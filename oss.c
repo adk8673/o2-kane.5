@@ -23,6 +23,8 @@
 #define ID_SECONDS 1
 #define ID_NANO_SECONDS 2
 #define ID_RESOURCE_DESCRIPTOR 3
+#define ID_MSG_REQUEST 4
+#define ID_MSG_CLOCK 5
 #define NUM_DIFF_RESOURCES 20
 #define MAX_RESOURCE_COUNT 10
 
@@ -45,13 +47,27 @@ ResourceDescriptor* resourceDescriptor = NULL;
 // shared memory id of resource descriptor
 int shmidResourceDescriptor = 0;
 
+// Message queue ID for sending requests
+int msgIdRequest = 0;
+
+// Message queue ID for controlling clock access
+int msgIdClock = 0;
+
 // Process name
 char* processName = NULL;
+
+// Define structure for receiving and sending messages
+typedef struct {
+	long mtype;
+	char mtext[50];
+} mymsg_t;
 
 void allocateAllSharedMemory();
 void deallocateAllSharedMemory();
 void handleInterruption(int);
 void initializeResourceDescriptor();
+void allocateAllMessageQueue();
+void deallocateAllMessageQueue();
 
 int main(int argc, char** argv)
 {
@@ -68,16 +84,39 @@ int main(int argc, char** argv)
 	// allocate all our shared memory
 	allocateAllSharedMemory();	
 
+	// allocate message queues
+	allocateAllMessageQueue();
+
 	// set an interrupt for our max real run time
 	setPeriodic(MAX_REAL_SECONDS);
 
 	// populate our resource descriptor array with random resource counts
 	initializeResourceDescriptor();	
 
+	printf("message queue test: %d %d\n", msgIdRequest, msgIdClock);
+	sleep(1000);
 	// deallocate all shared memory
 	deallocateAllSharedMemory();
 
+	// deallocate message queues
+	deallocateAllMessageQueue();
+
 	return 0;
+}
+
+void allocateAllMessageQueue()
+{
+	msgIdRequest = allocateMessageQueue(ID_MSG_REQUEST, processName);
+	msgIdClock = allocateMessageQueue(ID_MSG_CLOCK, processName);
+}
+
+void deallocateAllMessageQueue()
+{
+	if (msgIdRequest > 0)
+		deallocateMessageQueue(msgIdRequest, processName);
+
+	if (msgIdClock > 0)
+		deallocateMessageQueue(msgIdClock, processName);
 }
 
 void initializeResourceDescriptor()
@@ -96,6 +135,7 @@ void handleInterruption(int signo)
 	if (signo == SIGINT || signo == SIGALRM)
 	{
 		deallocateAllSharedMemory();
+		deallocateAllMessageQueue();
 		exit(0);
 	}
 }
