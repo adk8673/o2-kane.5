@@ -24,6 +24,7 @@
 #define ID_NANO_SECONDS 2
 #define ID_RESOURCE_DESCRIPTOR 3
 #define NUM_DIFF_RESOURCES 20
+#define MAX_RESOURCE_COUNT 10
 
 // Global definitions
 // Pointer to shared global seconds integer
@@ -39,7 +40,7 @@ int* nanoSeconds = NULL;
 int shmidNanoSeconds = 0;
 
 // Pointer to shared resource descriptor array
-struct ResourceDescriptor* resourceDescriptor = NULL;
+ResourceDescriptor* resourceDescriptor = NULL;
 
 // shared memory id of resource descriptor
 int shmidResourceDescriptor = 0;
@@ -50,12 +51,16 @@ char* processName = NULL;
 void allocateAllSharedMemory();
 void deallocateAllSharedMemory();
 void handleInterruption(int);
+void initializeResourceDescriptor();
 
 int main(int argc, char** argv)
 {
 	// Set our global process name
 	processName = argv[0];
-	
+
+	// seed our random values
+	srand(time(0) * getpid());
+		
 	// set our signal handlers
 	signal(SIGINT, handleInterruption);
 	signal(SIGALRM, handleInterruption);
@@ -66,14 +71,27 @@ int main(int argc, char** argv)
 	// set an interrupt for our max real run time
 	setPeriodic(MAX_REAL_SECONDS);
 
-	sleep (20000);
+	// populate our resource descriptor array with random resource counts
+	initializeResourceDescriptor();	
+
 	// deallocate all shared memory
 	deallocateAllSharedMemory();
 
 	return 0;
 }
 
-handleInterruption(int signo)
+void initializeResourceDescriptor()
+{
+	int i;
+	for (i = 0; i < NUM_DIFF_RESOURCES; ++i)
+	{
+		resourceDescriptor[i].TotalResources = (rand() % MAX_RESOURCE_COUNT) + 1;
+		resourceDescriptor[i].AvailableResources = resourceDescriptor[i].TotalResources;
+		resourceDescriptor[i].AllocatedResources = 0;
+	} 
+}
+
+void handleInterruption(int signo)
 {
 	if (signo == SIGINT || signo == SIGALRM)
 	{
