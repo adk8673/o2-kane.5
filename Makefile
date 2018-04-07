@@ -1,10 +1,10 @@
 CC=gcc
-OSS_OBJECTS=oss.o IPCUtilities.o ErrorLogging.o ProcessUtilities.o QueueUtilities.o PeriodicTimer.o 
+OSS_OBJECTS=oss.o IPCUtilities.o ErrorLogging.o ProcessUtilities.o PeriodicTimer.o 
 USER_OBJECTS=user.o IPCUtilities.o ErrorLogging.o
 LINKEDLBS=-lrt
 CFLAGS=-w
 
-default: oss user 
+default: oss 
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
