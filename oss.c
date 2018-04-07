@@ -19,7 +19,7 @@
 //#include"ProcessUtilities.h"
 #include"ResourceDescriptor.h"
 
-#define MAX_REAL_SECONDS 3
+#define MAX_REAL_SECONDS 2
 #define ID_SECONDS 1
 #define ID_NANO_SECONDS 2
 #define ID_RESOURCE_DESCRIPTOR 3
@@ -49,20 +49,37 @@ char* processName = NULL;
 
 void allocateAllSharedMemory();
 void deallocateAllSharedMemory();
+void handleInterruption(int);
 
 int main(int argc, char** argv)
 {
 	// Set our global process name
 	processName = argv[0];
 	
+	// set our signal handlers
+	signal(SIGINT, handleInterruption);
+	signal(SIGALRM, handleInterruption);
+
 	// allocate all our shared memory
-	allocateAllSharedMemory();
+	allocateAllSharedMemory();	
 
+	// set an interrupt for our max real run time
+	setPeriodic(MAX_REAL_SECONDS);
 
+	sleep (20000);
 	// deallocate all shared memory
 	deallocateAllSharedMemory();
 
 	return 0;
+}
+
+handleInterruption(int signo)
+{
+	if (signo == SIGINT || signo == SIGALRM)
+	{
+		deallocateAllSharedMemory();
+		exit(0);
+	}
 }
 
 void allocateAllSharedMemory()
