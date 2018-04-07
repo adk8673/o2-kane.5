@@ -15,9 +15,10 @@
 #include<time.h>
 #include"ErrorLogging.h"
 #include"IPCUtilities.h"
+#include"QueueUtilities.h"
 #include"PeriodicTimer.h"
 //#include"ProcessControlBlock.h"
-//#include"ProcessUtilities.h"
+#include"ProcessUtilities.h"
 #include"ResourceDescriptor.h"
 #include"StringUtilities.h"
 
@@ -30,6 +31,9 @@
 #define NUM_DIFF_RESOURCES 20
 #define MAX_RESOURCE_COUNT 10
 #define MAX_NUM_PROCESSES 1
+#define NANO_PER_SECOND 1000000000
+#define MAX_SPAWN_NANO 100000
+#define MAX_INTERNAL_SECONDS 8
 
 // Global definitions
 // Pointer to shared global seconds integer
@@ -68,6 +72,12 @@ typedef struct {
 // maximum number of global processes
 int maxNumProcesses = 0;
 
+// current number of child processes
+int currentNumProcesses = 0;
+
+// list of current executing processes
+pid_t* currentChildren = NULL;
+
 void allocateAllSharedMemory();
 void deallocateAllSharedMemory();
 void handleInterruption(int);
@@ -75,6 +85,8 @@ void initializeResourceDescriptor();
 void allocateAllMessageQueue();
 void deallocateAllMessageQueue();
 void checkCommandArgs(int, char**);
+void executeOss();
+void spawnProcess(int*, int*);
 
 int main(int argc, char** argv)
 {
@@ -83,6 +95,8 @@ int main(int argc, char** argv)
 	
 	// seed our random values
 	srand(time(0) * getpid());
+
+	printf("Intialize oss\n");
 
 	// Intiailize our max number of child processes to default, can be cahnged by command line if passed
 	maxNumProcesses = MAX_NUM_PROCESSES;
@@ -94,28 +108,81 @@ int main(int argc, char** argv)
 	signal(SIGINT, handleInterruption);
 	signal(SIGALRM, handleInterruption);
 
-	// allocate all our shared memory
+	// allocate all our shared ipc utilities
 	allocateAllSharedMemory();	
-
-	// allocate message queues
 	allocateAllMessageQueue();
 
 	// set an interrupt for our max real run time
 	setPeriodic(MAX_REAL_SECONDS);
 
-	// populate our resource descriptor array with random resource counts
-	initializeResourceDescriptor();	
-	
+	printf("Begin main execution of oss\n");
 
-	// deallocate all shared memory
+	executeOss();	
+
+	int status;
+	pid_t childpid;
+	while((childpid = wait(&status)) > 0);	
+
+	// deallocate all shared ipc resources
 	deallocateAllSharedMemory();
-
-	// deallocate message queues
 	deallocateAllMessageQueue();
+
+	printf("Exiting execution of oss\n");
 
 	return 0;
 }
 
+void executeOss()
+{
+	// populate our resource descriptor array with random resource counts
+	initializeResourceDescriptor();	
+
+	*seconds = 0;
+	*nanoSeconds = 0;
+
+	int spawnSeconds = 0;
+	int spawnNanoSeconds = 0;
+
+	currentChildren = malloc(sizeof(pid_t) * maxNumProcesses);
+
+//	while(*seconds <= MAX_INTERNAL_SECONDS)
+//	{
+		spawnProcess(&spawnSeconds, &spawnNanoSeconds);
+//	}
+	
+	if (currentChildren != NULL)
+		free(currentChildren);
+}
+
+void spawnProcess(int* spawnSeconds, int* spawnNanoSeconds)
+{
+	// We need to make sure that is both time to spawn a new processes and there isn't already too 
+	// many process spawned
+	
+	printf("Current Time %d:%d Scheduled spawn: %d:%d Current processes: %d Max processes: %d\n", *seconds, *nanoSeconds, *spawnSeconds, *spawnNanoSeconds, currentNumProcesses, maxNumProcesses);
+	if ( (*seconds > *spawnSeconds || (*seconds >= *seconds && *nanoSeconds >= *spawnNanoSeconds))
+		&&  currentNumProcesses < maxNumProcesses) 	
+	{
+		printf("In spawn\n");
+		pid_t newChild = createChildProcess("./user", processName);
+
+		++currentNumProcesses;
+		enqueueValue(currentChildren, newChild, maxNumProcesses);					
+
+		// schedule next spawn time
+		*spawnNanoSeconds = *nanoSeconds + (rand() % MAX_SPAWN_NANO);
+
+		if (*spawnNanoSeconds >= NANO_PER_SECOND)
+		{
+			*spawnSeconds = *seconds + 1;
+			*spawnNanoSeconds -= NANO_PER_SECOND;
+		}
+		else
+		{
+			*spawnSeconds = *seconds;
+		}
+	}
+}
 // Check our arguments passed from the command line.  In this case, since we are only accepting the
 // -h option from the command line, we only need to return 1 int which indicates if a the help 
 // argument was passed.
@@ -179,6 +246,10 @@ void handleInterruption(int signo)
 	{
 		deallocateAllSharedMemory();
 		deallocateAllMessageQueue();
+	
+		if (currentChildren != NULL)
+			free(currentChildren);
+
 		exit(0);
 	}
 }
