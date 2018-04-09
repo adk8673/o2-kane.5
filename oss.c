@@ -17,7 +17,7 @@
 #include"IPCUtilities.h"
 #include"QueueUtilities.h"
 #include"PeriodicTimer.h"
-//#include"ProcessControlBlock.h"
+#include"ProcessControlBlock.h"
 #include"ProcessUtilities.h"
 #include"ResourceDescriptor.h"
 #include"StringUtilities.h"
@@ -28,12 +28,16 @@
 #define ID_RESOURCE_DESCRIPTOR 3
 #define ID_MSG_REQUEST 4
 #define ID_MSG_CLOCK 5
+#define ID_PCB 6
+#define ID_MSG_GRANT 7
 #define NUM_DIFF_RESOURCES 20
 #define MAX_RESOURCE_COUNT 10
 #define MAX_NUM_PROCESSES 1
 #define NANO_PER_SECOND 1000000000
 #define MAX_SPAWN_NANO 100000
 #define MAX_INTERNAL_SECONDS 8
+#define MAX_NEEDED_RESOURCE 6
+#define TIME_INCREMENT 5000
 
 // Global definitions
 // Pointer to shared global seconds integer
@@ -54,11 +58,20 @@ ResourceDescriptor* resourceDescriptor = NULL;
 // shared memory id of resource descriptor
 int shmidResourceDescriptor = 0;
 
+// Pointer to shared process control block
+ProcessControlBlock* pcb = NULL;
+
+// shared memory id of PCB
+int shmidPCB = 0;
+
 // Message queue ID for sending requests
 int msgIdRequest = 0;
 
 // Message queue ID for controlling clock access
 int msgIdClock = 0;
+
+// Message queue ID for granting resource requests
+int msgIdGrant = 0;
 
 // Process name
 char* processName = NULL;
@@ -75,8 +88,8 @@ int maxNumProcesses = 0;
 // current number of child processes
 int currentNumProcesses = 0;
 
-// list of current executing processes
-pid_t* currentChildren = NULL;
+// List of availables PCB slots
+int* pcbOccupied = NULL;
 
 void allocateAllSharedMemory();
 void deallocateAllSharedMemory();
@@ -87,6 +100,9 @@ void deallocateAllMessageQueue();
 void checkCommandArgs(int, char**);
 void executeOss();
 void spawnProcess(int*, int*);
+void processResourceRequest(mymsg_t);
+int findProcessInPcb(pid_t);
+void incrementClock(int incrementNanoSeconds);
 
 int main(int argc, char** argv)
 {
@@ -143,15 +159,91 @@ void executeOss()
 	int spawnSeconds = 0;
 	int spawnNanoSeconds = 0;
 
-	currentChildren = malloc(sizeof(pid_t) * maxNumProcesses);
+	pcbOccupied = malloc(sizeof(int) * maxNumProcesses);
 
-//	while(*seconds <= MAX_INTERNAL_SECONDS)
-//	{
-		spawnProcess(&spawnSeconds, &spawnNanoSeconds);
-//	}
+	mymsg_t requestMsg, clockMsg;
 	
-	if (currentChildren != NULL)
-		free(currentChildren);
+	// need to allow access to critical section with one initial message
+	clockMsg.mtype = 1;
+	if ( msgsnd(msgIdClock, &clockMsg, sizeof(clockMsg), 0) == -1 )
+		writeError("Failed to send message to clock access\n", processName);
+
+	while( *seconds <= MAX_INTERNAL_SECONDS )
+	{
+		spawnProcess( &spawnSeconds, &spawnNanoSeconds );
+
+		while ( msgrcv( msgIdRequest, &requestMsg, sizeof(requestMsg), 0, IPC_NOWAIT) > 0 )
+		{
+			printf("Received request from child %d\n", requestMsg.mtype);
+			processResourceRequest(	requestMsg );
+		}
+
+		int increment = rand() % TIME_INCREMENT;
+		
+		if ( msgrcv(msgIdClock, &clockMsg, sizeof(clockMsg), 0, 0) == -1 )
+			writeError("Failed to receive clock message\n", processName);
+
+		incrementClock(increment);
+		clockMsg.mtype = 1;
+
+		if ( msgsnd(msgIdClock, &clockMsg, sizeof(clockMsg), 0) == -1 )
+			writeError("Failed to send clock message\m", processName);
+
+	}
+	
+	if ( pcbOccupied != NULL )
+		free( pcbOccupied );
+}
+
+void processResourceRequest(mymsg_t requestMsg)
+{
+	pid_t requestingPid = requestMsg.mtype;
+
+	// find this process in our PCB
+	int index = findProcessInPcb(requestingPid);
+
+	int resourceIndex = atoi(requestMsg.mtext);
+
+	// for now, grant request
+	
+	pcb[index].CurrentResource[resourceIndex] = pcb[index].CurrentResource[resourceIndex] + 1;
+	resourceDescriptor[resourceIndex].AllocatedResources = resourceDescriptor[resourceIndex].AllocatedResources + 1;
+	resourceDescriptor[resourceIndex].AvailableResources = resourceDescriptor[resourceIndex].AvailableResources - 1;
+
+	mymsg_t grantMsg;
+	grantMsg.mtype = requestingPid;
+	
+	if ( msgsnd(msgIdGrant, &grantMsg, sizeof(grantMsg), 0) == -1 )
+		writeError("Failed to send grant message to child\n", processName);
+}
+
+void incrementClock(int incrementNanoSeconds)
+{
+	*nanoSeconds += incrementNanoSeconds;
+
+	if (*nanoSeconds >= NANO_PER_SECOND)
+	{
+		*seconds = *seconds + 1;
+		*nanoSeconds -= NANO_PER_SECOND;
+	}
+}
+
+int findProcessInPcb(pid_t pid)
+{
+	int index, found;
+	for ( index = 0, found = 0; index < maxNumProcesses && !found; ++index)
+	{
+		if ( pcb[index].ProcessId == pid )
+		{
+			found = 1;
+			break;
+		}
+	}
+
+	if ( !found )
+		index = -1;
+	
+	return index;
 }
 
 void spawnProcess(int* spawnSeconds, int* spawnNanoSeconds)
@@ -159,15 +251,35 @@ void spawnProcess(int* spawnSeconds, int* spawnNanoSeconds)
 	// We need to make sure that is both time to spawn a new processes and there isn't already too 
 	// many process spawned
 	
-	printf("Current Time %d:%d Scheduled spawn: %d:%d Current processes: %d Max processes: %d\n", *seconds, *nanoSeconds, *spawnSeconds, *spawnNanoSeconds, currentNumProcesses, maxNumProcesses);
 	if ( (*seconds > *spawnSeconds || (*seconds >= *seconds && *nanoSeconds >= *spawnNanoSeconds))
 		&&  currentNumProcesses < maxNumProcesses) 	
 	{
-		printf("In spawn\n");
+		int index, found;
+		for (index = 0, found = 0; index < maxNumProcesses && !found; ++index)
+		{
+			if (pcbOccupied[index] == 0)
+			{
+				found = 1;
+				break;
+			}
+		}
+	
+		// If we can't find a spot, don't spawn
+		if (!found)
+			return;
+		
 		pid_t newChild = createChildProcess("./user", processName);
 
+		pcb[index].ProcessId = newChild;
+		
+		int i;
+		for (i = 0; i < NUM_DIFF_RESOURCES; ++i)
+		{
+			pcb[index].CurrentResource[i] = 0;
+			pcb[index].MaxResource[i] = rand() % MAX_NEEDED_RESOURCE;
+		}		
+		
 		++currentNumProcesses;
-		enqueueValue(currentChildren, newChild, maxNumProcesses);					
 
 		// schedule next spawn time
 		*spawnNanoSeconds = *nanoSeconds + (rand() % MAX_SPAWN_NANO);
@@ -181,8 +293,14 @@ void spawnProcess(int* spawnSeconds, int* spawnNanoSeconds)
 		{
 			*spawnSeconds = *seconds;
 		}
+
+		printf("Spawned child %d\nMax Resource requirements:", newChild);
+		for (i = 0; i < NUM_DIFF_RESOURCES; ++i)
+			printf("%d: %d ", i, pcb[index].MaxResource[i]);
+		printf("\n");
 	}
 }
+
 // Check our arguments passed from the command line.  In this case, since we are only accepting the
 // -h option from the command line, we only need to return 1 int which indicates if a the help 
 // argument was passed.
@@ -218,6 +336,7 @@ void allocateAllMessageQueue()
 {
 	msgIdRequest = allocateMessageQueue(ID_MSG_REQUEST, processName);
 	msgIdClock = allocateMessageQueue(ID_MSG_CLOCK, processName);
+	msgIdGrant = allocateMessageQueue(ID_MSG_GRANT, processName);
 }
 
 void deallocateAllMessageQueue()
@@ -227,6 +346,9 @@ void deallocateAllMessageQueue()
 
 	if (msgIdClock > 0)
 		deallocateMessageQueue(msgIdClock, processName);
+
+	if (msgIdGrant > 0)
+		deallocateMessageQueue(msgIdGrant, processName);
 }
 
 void initializeResourceDescriptor()
@@ -247,10 +369,9 @@ void handleInterruption(int signo)
 		deallocateAllSharedMemory();
 		deallocateAllMessageQueue();
 	
-		if (currentChildren != NULL)
-			free(currentChildren);
-
-		exit(0);
+		if ( pcbOccupied != NULL )
+			free(pcbOccupied);
+		kill(0, SIGKILL);
 	}
 }
 
@@ -267,6 +388,10 @@ void allocateAllSharedMemory()
 	// allocate and attach to resource desctipro array
 	shmidResourceDescriptor = allocateSharedMemory(ID_RESOURCE_DESCRIPTOR, sizeof(ResourceDescriptor) * NUM_DIFF_RESOURCES, processName);
 	resourceDescriptor = shmat(shmidResourceDescriptor, 0, 0);
+
+	// allocate and attach to pcb
+	shmidPCB = allocateSharedMemory(ID_PCB, sizeof(ProcessControlBlock) * maxNumProcesses, processName);
+	pcb = shmat(shmidPCB, 0, 0);
 }
 
 void deallocateAllSharedMemory()
@@ -304,4 +429,16 @@ void deallocateAllSharedMemory()
 	{
 		deallocateSharedMemory(shmidResourceDescriptor, processName);
 	}
+
+	if ( pcb != NULL )
+	{
+		if ( shmdt(pcb) == -1)
+			writeError("Failed to dettach from shared pcb\n", processName);
+	}
+
+	if ( shmidPCB > 0 )
+	{
+		deallocateSharedMemory(shmidPCB, processName);
+	}
+
 }

@@ -11,7 +11,7 @@
 #include<time.h>
 #include"ErrorLogging.h"
 #include"IPCUtilities.h"
-//#include"ProcessControlBlock.h"
+#include"ProcessControlBlock.h"
 #include"ResourceDescriptor.h"
 
 #define ID_SECONDS 1
@@ -19,12 +19,16 @@
 #define ID_RESOURCE_DESCRIPTOR 3
 #define ID_MSG_REQUEST 4
 #define ID_MSG_CLOCK 5
+#define ID_PCB 6
+#define ID_MSG_GRANT 7
 #define NUM_DIFF_RESOURCES 20
 #define MAX_RESOURCE_COUNT 10
 #define MAX_NUM_PROCESSES 1
 #define NANO_PER_SECOND 1000000000
 #define MAX_SPAWN_NANO 100000
 #define MAX_INTERNAL_SECONDS 8
+#define ACTION_TIME_BOUND 10000
+#define ACTION_TYPES 2
 
 // Global definitions
 // Pointer to shared global seconds integer
@@ -45,11 +49,20 @@ ResourceDescriptor* resourceDescriptor = NULL;
 // shared memory id of resource descriptor
 int shmidResourceDescriptor = 0;
 
+// Pointer to shared PCB
+ProcessControlBlock* pcb = NULL;
+
+// shared memory id of process control block
+int shmidPCB = 0;
+
 // Message queue ID for sending requests
 int msgIdRequest = 0;
 
 // Message queue ID for controlling clock access
 int msgIdClock = 0;
+
+// Message queue ID for granting requests
+int msgIdGrant = 0;
 
 // Process name
 char* processName = NULL;
@@ -73,9 +86,106 @@ int main(int argc, char** argv)
 	
 	attachToExistingIPC();
 
-//	dettachFromExistingIPC();	
+	mainUserLoop();
+
+	dettachFromExistingIPC();	
 
 	return 0;
+}
+
+void mainUserLoop()
+{
+	int pcbIndex = findProcessInPcb( getpid() );
+
+	int nextActionNanoSeconds = rand() % ACTION_TIME_BOUND;
+
+	mymsg_t clockMsg;
+	if ( msgrcv(msgIdClock, &clockMsg, sizeof(clockMsg), 0, 0) == -1 )
+		writeError("Failed to receive message to access critical sections\n", processName);
+
+	int actionNanoSeconds = *nanoSeconds + nextActionNanoSeconds;
+	int actionSeconds = *seconds;	
+
+	if ( actionNanoSeconds >= NANO_PER_SECOND )
+	{
+		actionNanoSeconds -= NANO_PER_SECOND;
+		++actionSeconds;
+	}
+	
+	clockMsg.mtype = 1;
+	if ( msgsnd(msgIdClock, &clockMsg, sizeof(clockMsg), 0) == -1 )
+		writeError("Failed to send clock message to give access to critical section\n", processName);
+	
+	int finishedExecution = 0;
+	while ( !finishedExecution )
+	{
+		int resourceIndex = -1;
+		if ( msgrcv(msgIdClock, &clockMsg, sizeof(clockMsg), 0, 0) == -1 )
+			writeError("Failed to receive message to access critical sections\n", processName);
+		
+
+		if ( (*seconds > actionSeconds) || (*seconds >= actionSeconds && *nanoSeconds >= actionNanoSeconds) )
+		{
+			printf("test1\n");
+			int action = rand() % ACTION_TYPES;
+
+			if ( action == 1 || action == 0 )
+			{	
+				int resourceIndex = rand() % NUM_DIFF_RESOURCES;
+				
+				printf("Child %d about to request resourcei %d\n", getpid(), resourceIndex);	
+				if ( pcb[pcbIndex].CurrentResource[resourceIndex] >= pcb[pcbIndex].MaxResource[resourceIndex] )
+					resourceIndex = -1;
+			}
+
+			actionNanoSeconds = *nanoSeconds + nextActionNanoSeconds;
+			actionSeconds = *seconds;	
+
+			if ( actionNanoSeconds >= NANO_PER_SECOND )
+			{
+				actionNanoSeconds -= NANO_PER_SECOND;
+				++actionSeconds;
+			}	
+		}
+
+		clockMsg.mtype = 1;
+		if ( msgsnd(msgIdClock, &clockMsg, sizeof(clockMsg), 0) == -1 )
+			writeError("Failed to send clock message to give access to critical section\n", processName);
+
+		if ( resourceIndex != -1 )
+		{
+			mymsg_t msgRequest;
+			msgRequest.mtype = getpid();
+			
+			char resourceString[1024];
+			snprintf(resourceString, 1024, "%d", resourceIndex);
+	
+			if ( msgsnd(msgIdRequest, &msgRequest, sizeof(msgRequest), 0) == -1 )
+				writeError("Failed to send message requesting resource\n", processName);
+
+			mymsg_t msgGrant;
+			if ( msgrcv(msgIdGrant, &msgGrant, sizeof(msgGrant), getpid(), 0) == -1 )
+				writeError("Failed to receive message granting resource\n", processName);
+		}
+	}
+}
+
+int findProcessInPcb(pid_t pid)
+{
+	int index, found;
+	for ( index = 0, found = 0; index < maxNumProcesses && !found; ++index)
+	{
+		if ( pcb[index].ProcessId == pid )
+		{
+			found = 1;
+			break;
+		}
+	}
+
+	if ( !found )
+		index = -1;
+	
+	return index;
 }
 
 void attachToExistingIPC()
@@ -83,29 +193,36 @@ void attachToExistingIPC()
 	seconds = getExistingSharedMemory(ID_SECONDS, processName);
 	nanoSeconds = getExistingSharedMemory(ID_NANO_SECONDS, processName);
 	resourceDescriptor = getExistingSharedMemory(ID_RESOURCE_DESCRIPTOR, processName);
-	
+	pcb = getExistingSharedMemory(ID_PCB, processName);	
+
 	msgIdRequest = getExistingMessageQueue(ID_MSG_REQUEST, processName);
 	msgIdClock = getExistingMessageQueue(ID_MSG_CLOCK, processName);
-
+	msgIdGrant = getExistingMessageQueue(ID_MSG_GRANT, processName);
 }
 
 void dettachFromExistingIPC()
 {
-	if (seconds != NULL)
+	if ( seconds != NULL )
 	{
 		if ( shmdt(seconds) == -1 )
 			writeError("Failed to dettach from seconds\n", processName);
 	}
 
-	if (nanoSeconds != NULL)
+	if ( nanoSeconds != NULL )
 	{
 		if ( shmdt(nanoSeconds) == -1 )
 			writeError("Failed to dettach from nano seconds\n", processName);
 	}
 	
-	if (resourceDescriptor != NULL)
+	if ( resourceDescriptor != NULL )
 	{
 		if ( shmdt(resourceDescriptor) == -1 )
 			writeError("Failed to dettach from resource descriptor\n", processName);
+	}
+
+	if ( pcb != NULL)
+	{
+		if ( shmdt(pcb) == -1 )
+			writeError("Failed to dettach from pcb\n", processName);
 	}
 }
