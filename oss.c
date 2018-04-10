@@ -32,12 +32,13 @@
 #define ID_MSG_GRANT 7
 #define NUM_DIFF_RESOURCES 20
 #define MAX_RESOURCE_COUNT 10
-#define MAX_NUM_PROCESSES 1
+#define MAX_NUM_PROCESSES 2
 #define NANO_PER_SECOND 1000000000
 #define MAX_SPAWN_NANO 100000
 #define MAX_INTERNAL_SECONDS 8
 #define MAX_NEEDED_RESOURCE 6
 #define TIME_INCREMENT 5000
+#define MAX_LINES_WRITE 10000
 
 // Global definitions
 // Pointer to shared global seconds integer
@@ -91,18 +92,29 @@ int currentNumProcesses = 0;
 // List of availables PCB slots
 int* pcbOccupied = NULL;
 
+// Blocked queue
+pid_t* blockedQueue = NULL;
+
+// File
+FILE* ossLog = NULL;
+
+// Lines written
+int linesWritten = 0;
+
 void allocateAllSharedMemory();
 void deallocateAllSharedMemory();
-void handleInterruption(int);
+void handleInterruption( int );
 void initializeResourceDescriptor();
 void allocateAllMessageQueue();
 void deallocateAllMessageQueue();
-void checkCommandArgs(int, char**);
+void checkCommandArgs( int, char * * );
 void executeOss();
-void spawnProcess(int*, int*);
-void processResourceRequest(mymsg_t);
-int findProcessInPcb(pid_t);
-void incrementClock(int incrementNanoSeconds);
+void spawnProcess( int *, int * );
+void processResourceRequest( mymsg_t );
+int findProcessInPcb( pid_t );
+void incrementClock( int );
+int checkRequest( int, pid_t );
+void writeCurrentAllocationToLog();
 
 int main(int argc, char** argv)
 {
@@ -159,7 +171,10 @@ void executeOss()
 	int spawnSeconds = 0;
 	int spawnNanoSeconds = 0;
 
+	ossLog = fopen("oss.log", "w");
+
 	pcbOccupied = malloc(sizeof(int) * maxNumProcesses);
+	blockedQueue = malloc(sizeof(pid_t) * maxNumProcesses);
 
 	mymsg_t requestMsg, clockMsg;
 	
@@ -171,7 +186,7 @@ void executeOss()
 	while( *seconds <= MAX_INTERNAL_SECONDS )
 	{
 		spawnProcess( &spawnSeconds, &spawnNanoSeconds );
-
+		
 		while ( msgrcv( msgIdRequest, &requestMsg, sizeof(requestMsg), 0, IPC_NOWAIT) > 0 )
 		{
 			printf("Received request from child %d\n", requestMsg.mtype);
@@ -192,7 +207,13 @@ void executeOss()
 	}
 	
 	if ( pcbOccupied != NULL )
-		free( pcbOccupied );
+		free(pcbOccupied);
+
+	if ( blockedQueue != NULL )
+		free(blockedQueue);
+	
+	if ( ossLog != NULL )
+		fclose(ossLog);
 }
 
 void processResourceRequest(mymsg_t requestMsg)
@@ -204,17 +225,147 @@ void processResourceRequest(mymsg_t requestMsg)
 
 	int resourceIndex = atoi(requestMsg.mtext);
 
-	// for now, grant request
+	writeCurrentAllocationToLog();
 	
-	pcb[index].CurrentResource[resourceIndex] = pcb[index].CurrentResource[resourceIndex] + 1;
-	resourceDescriptor[resourceIndex].AllocatedResources = resourceDescriptor[resourceIndex].AllocatedResources + 1;
-	resourceDescriptor[resourceIndex].AvailableResources = resourceDescriptor[resourceIndex].AvailableResources - 1;
+	if ( checkRequest(resourceIndex, requestingPid) == 1 )
+	{
+		printf("resourceIndex: %d\n", resourceIndex);
+		pcb[index].CurrentResource[resourceIndex] = pcb[index].CurrentResource[resourceIndex] + 1;
+		resourceDescriptor[resourceIndex].AllocatedResources = resourceDescriptor[resourceIndex].AllocatedResources + 1;
+		resourceDescriptor[resourceIndex].AvailableResources = resourceDescriptor[resourceIndex].AvailableResources - 1;
 
-	mymsg_t grantMsg;
-	grantMsg.mtype = requestingPid;
+		mymsg_t grantMsg;
+		grantMsg.mtype = requestingPid;
 	
-	if ( msgsnd(msgIdGrant, &grantMsg, sizeof(grantMsg), 0) == -1 )
-		writeError("Failed to send grant message to child\n", processName);
+		if ( msgsnd(msgIdGrant, &grantMsg, sizeof(grantMsg), 0) == -1 )
+			writeError("Failed to send grant message to child\n", processName);
+
+		writeCurrentAllocationToLog();
+	}
+	else
+	{
+		pcb[index].BlockedResource = resourceIndex;
+		enqueueValue(blockedQueue, requestingPid, maxNumProcesses);	
+	}
+}
+
+int checkRequest(int resourceIndex, pid_t requestingPid)
+{
+	int pcbIndex = findProcessInPcb(requestingPid);
+
+	int tempAvailable[NUM_DIFF_RESOURCES];
+	int i;
+	for ( i = 0; i < NUM_DIFF_RESOURCES; ++i)
+	{
+		tempAvailable[i] = resourceDescriptor[i].AvailableResources;
+	}
+
+	// Matrix of current needs - instead of using dynamic max array value, we need to use the constant
+	// of MAX_NUM_PROCESSES so we can declare a two dimensional array
+	int processNeeds[MAX_NUM_PROCESSES][NUM_DIFF_RESOURCES];
+
+	for ( i = 0; i < maxNumProcesses; ++i )
+	{
+		int j;
+		for ( j = 0; j < NUM_DIFF_RESOURCES; ++j )
+		{
+			processNeeds[i][j] = pcb[i].MaxResource[j] - pcb[i].CurrentResource[j];
+//			if (processNeeds[i][j] < 0)
+//			printf("curr: %d max: %d\n", pcb[i].CurrentResource[j], pcb[i].MaxResource[j]);
+		}
+	}
+
+	// simulate the state if were to give the requested resource
+	--tempAvailable[resourceIndex];
+	--processNeeds[pcbIndex][resourceIndex];	
+
+	int* processFinish = malloc(sizeof(int) * maxNumProcesses);
+
+	for (i = 0; i < maxNumProcesses; ++i)
+		processFinish[i] = 0; 
+
+	// If we don't have enough resources to grant this request, we don't even need to check if we are 
+	// in a safe state
+	int grantRequest = 1;
+	if ( resourceDescriptor[resourceIndex].AvailableResources > 0 )
+	{
+			// outer loop to check for finished processes
+			int finishedCount = 0, foundSafe;
+			do
+			{
+				foundSafe = 0;
+
+				// iterate over each process
+				int processNum;
+				for ( processNum = 0; processNum < maxNumProcesses; ++processNum )
+				{
+					// we don't need to check processes that have already finished
+					if ( processFinish[processNum] == 0 )
+					{
+						int resourceNum, hasEnoughResources = 1;
+						for ( resourceNum = 0; resourceNum < NUM_DIFF_RESOURCES && hasEnoughResources == 1; ++resourceNum )
+						{
+//							printf("needs: [%d][%d] %d tempAvailable: %d\n", processNum, resourceNum, processNeeds[processNum][resourceNum], tempAvailable[resourceNum]);
+							if ( processNeeds[processNum][resourceNum] > tempAvailable[resourceNum] )
+								hasEnoughResources = 0;
+						}
+
+						// we can finish this process
+						if ( hasEnoughResources == 1 )
+						{
+							processFinish[processNum] = 1;
+							foundSafe = 1;
+		
+							// free up all the resources for this process
+							for ( resourceNum = 0; resourceNum < NUM_DIFF_RESOURCES; ++resourceNum)
+								tempAvailable[resourceNum] += pcb[processNum].CurrentResource[resourceNum];
+							
+							++finishedCount;
+						}
+					}
+				}
+				
+				if ( foundSafe == 0 )
+					grantRequest = 0;
+			} while ( finishedCount < maxNumProcesses && foundSafe );	
+	}
+	
+	if ( processFinish != NULL )
+		free (processFinish);
+	
+	return grantRequest;
+}
+
+void writeCurrentAllocationToLog()
+{
+	if (ossLog != NULL && linesWritten < MAX_LINES_WRITE)
+	{
+		fprintf(ossLog, "Total resource allocation: \n");
+		++linesWritten;
+		
+		int i;
+		fprintf(ossLog, "\t");
+		for ( i = 0; i < NUM_DIFF_RESOURCES; ++i )
+		{
+			fprintf(ossLog, "R%d\t", i); 	
+		}
+
+		fprintf(ossLog, "\n");
+		++linesWritten;
+
+		for ( i = 0; i < maxNumProcesses; ++i)
+		{
+			fprintf(ossLog, "P%d\t", i);
+			int j;
+			for ( j = 0; j < NUM_DIFF_RESOURCES; ++j)
+			{
+				fprintf(ossLog, "%d\t", pcb[i].CurrentResource[j]);
+			}
+
+			fprintf(ossLog, "\n");
+			++linesWritten;
+		}
+	}
 }
 
 void incrementClock(int incrementNanoSeconds)
@@ -255,7 +406,7 @@ void spawnProcess(int* spawnSeconds, int* spawnNanoSeconds)
 		&&  currentNumProcesses < maxNumProcesses) 	
 	{
 		int index, found;
-		for (index = 0, found = 0; index < maxNumProcesses && !found; ++index)
+		for ( index = 0, found = 0; index < maxNumProcesses && !found; ++index )
 		{
 			if (pcbOccupied[index] == 0)
 			{
@@ -263,20 +414,25 @@ void spawnProcess(int* spawnSeconds, int* spawnNanoSeconds)
 				break;
 			}
 		}
-	
+		
 		// If we can't find a spot, don't spawn
-		if (!found)
+		if ( !found )
 			return;
 		
 		pid_t newChild = createChildProcess("./user", processName);
 
+		pcbOccupied[index] = 1;
 		pcb[index].ProcessId = newChild;
 		
 		int i;
-		for (i = 0; i < NUM_DIFF_RESOURCES; ++i)
+		for ( i = 0; i < NUM_DIFF_RESOURCES; ++i )
 		{
+			int maxNeeded = MAX_NEEDED_RESOURCE;
+			if ( resourceDescriptor[i].TotalResources < maxNeeded)
+				maxNeeded = resourceDescriptor[i].TotalResources;
+
 			pcb[index].CurrentResource[i] = 0;
-			pcb[index].MaxResource[i] = rand() % MAX_NEEDED_RESOURCE;
+			pcb[index].MaxResource[i] = rand() % maxNeeded;
 		}		
 		
 		++currentNumProcesses;
@@ -294,7 +450,7 @@ void spawnProcess(int* spawnSeconds, int* spawnNanoSeconds)
 			*spawnSeconds = *seconds;
 		}
 
-		printf("Spawned child %d\nMax Resource requirements:", newChild);
+		printf("Spawned child %d\nMax Resource requirements ", newChild);
 		for (i = 0; i < NUM_DIFF_RESOURCES; ++i)
 			printf("%d: %d ", i, pcb[index].MaxResource[i]);
 		printf("\n");
@@ -371,6 +527,10 @@ void handleInterruption(int signo)
 	
 		if ( pcbOccupied != NULL )
 			free(pcbOccupied);
+
+		if ( ossLog != NULL )
+			fclose(ossLog);
+
 		kill(0, SIGKILL);
 	}
 }

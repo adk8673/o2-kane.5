@@ -23,6 +23,9 @@ typedef struct {
 
 	// Current Resource counts
 	int CurrentResource[NUM_DIFF_RESOURCES];
+
+	// Blocked on resource
+	int BlockedResource;
 } ProcessControlBlock;
 
 #endif

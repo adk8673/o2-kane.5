@@ -23,7 +23,7 @@
 #define ID_MSG_GRANT 7
 #define NUM_DIFF_RESOURCES 20
 #define MAX_RESOURCE_COUNT 10
-#define MAX_NUM_PROCESSES 1
+#define MAX_NUM_PROCESSES 2
 #define NANO_PER_SECOND 1000000000
 #define MAX_SPAWN_NANO 100000
 #define MAX_INTERNAL_SECONDS 8
@@ -73,9 +73,6 @@ typedef struct {
 	char mtext[50];
 } mymsg_t;
 
-// maximum number of global processes
-int maxNumProcesses = 0;
-
 void attachToExistingIPC();
 void dettachFromExistingIPC();
 
@@ -96,7 +93,7 @@ int main(int argc, char** argv)
 void mainUserLoop()
 {
 	int pcbIndex = findProcessInPcb( getpid() );
-
+printf("PCB index for %d: %d\n", pcbIndex, getpid());
 	int nextActionNanoSeconds = rand() % ACTION_TIME_BOUND;
 
 	mymsg_t clockMsg;
@@ -122,20 +119,18 @@ void mainUserLoop()
 		int resourceIndex = -1;
 		if ( msgrcv(msgIdClock, &clockMsg, sizeof(clockMsg), 0, 0) == -1 )
 			writeError("Failed to receive message to access critical sections\n", processName);
-		
 
 		if ( (*seconds > actionSeconds) || (*seconds >= actionSeconds && *nanoSeconds >= actionNanoSeconds) )
 		{
-			printf("test1\n");
 			int action = rand() % ACTION_TYPES;
 
 			if ( action == 1 || action == 0 )
 			{	
-				int resourceIndex = rand() % NUM_DIFF_RESOURCES;
-				
-				printf("Child %d about to request resourcei %d\n", getpid(), resourceIndex);	
+				resourceIndex = rand() % NUM_DIFF_RESOURCES;
+					
 				if ( pcb[pcbIndex].CurrentResource[resourceIndex] >= pcb[pcbIndex].MaxResource[resourceIndex] )
 					resourceIndex = -1;
+
 			}
 
 			actionNanoSeconds = *nanoSeconds + nextActionNanoSeconds;
@@ -145,27 +140,29 @@ void mainUserLoop()
 			{
 				actionNanoSeconds -= NANO_PER_SECOND;
 				++actionSeconds;
-			}	
+			}
 		}
-
+		
 		clockMsg.mtype = 1;
 		if ( msgsnd(msgIdClock, &clockMsg, sizeof(clockMsg), 0) == -1 )
 			writeError("Failed to send clock message to give access to critical section\n", processName);
 
 		if ( resourceIndex != -1 )
 		{
+			printf("Child %d about to request resource %d\n", getpid(), resourceIndex);
 			mymsg_t msgRequest;
 			msgRequest.mtype = getpid();
 			
-			char resourceString[1024];
-			snprintf(resourceString, 1024, "%d", resourceIndex);
+			snprintf(msgRequest.mtext, 50, "%d", resourceIndex);
 	
 			if ( msgsnd(msgIdRequest, &msgRequest, sizeof(msgRequest), 0) == -1 )
 				writeError("Failed to send message requesting resource\n", processName);
-
 			mymsg_t msgGrant;
+			
 			if ( msgrcv(msgIdGrant, &msgGrant, sizeof(msgGrant), getpid(), 0) == -1 )
 				writeError("Failed to receive message granting resource\n", processName);
+			
+			finishedExecution = 1;
 		}
 	}
 }
@@ -173,7 +170,7 @@ void mainUserLoop()
 int findProcessInPcb(pid_t pid)
 {
 	int index, found;
-	for ( index = 0, found = 0; index < maxNumProcesses && !found; ++index)
+	for ( index = 0, found = 0; index < MAX_NUM_PROCESSES && !found; ++index)
 	{
 		if ( pcb[index].ProcessId == pid )
 		{
