@@ -216,6 +216,53 @@ void executeOss()
 		fclose(ossLog);
 }
 
+void checkQueue()
+{
+	pid_t* tempQueue = malloc(sizeof(pid_t) * maxNumProcesses);
+	pid_t blockedPid = dequeueValue(blockedQueue, maxNumProcesses);
+	
+	while ( blockedPid != 0 )
+	{
+		int index = findProcessInPcb(blockedPid);
+		int resourceIndex = pcb[index].BlockedResource;
+
+		if ( checkRequest(resourceIndex, blockedPid) == 1 )
+		{
+			pcb[index].CurrentResource[resourceIndex] = pcb[index].CurrentResource[resourceIndex] + 1;
+			resourceDescriptor[resourceIndex].AllocatedResources = resourceDescriptor[resourceIndex].AllocatedResources + 1;
+			resourceDescriptor[resourceIndex].AvailableResources = resourceDescriptor[resourceIndex].AvailableResources - 1;
+
+			mymsg_t grantMsg;
+			grantMsg.mtype = blockedPid;
+	
+			if ( msgsnd(msgIdGrant, &grantMsg, sizeof(grantMsg), 0) == -1 )
+				writeError("Failed to send grant message to child\n", processName);
+			
+			if ( ossLog != NULL && linesWritten < MAX_LINES_WRITE )
+			{
+				fprintf(ossLog, "Child %d was removed from block queue after waiting for resource %d", blockedPid, resourceIndex);
+			}
+
+			writeCurrentAllocationToLog();
+
+		}
+		else 
+		{
+			enqueueValue(tempQueue, blockedPid, maxNumProcesses);
+		}	
+	}
+
+	blockedPid = dequeueValue(tempQueue, maxNumProcesses);
+	while ( blockedPid != 0 )
+	{
+		enqueueValue(blockedQueue, blockedPid, maxNumProcesses);
+		blockedPid = dequeueValue(tempQueue, maxNumProcesses);
+	}
+
+	free(tempQueue);
+	
+}
+
 void processResourceRequest(mymsg_t requestMsg)
 {
 	pid_t requestingPid = requestMsg.mtype;
@@ -225,11 +272,8 @@ void processResourceRequest(mymsg_t requestMsg)
 
 	int resourceIndex = atoi(requestMsg.mtext);
 
-	writeCurrentAllocationToLog();
-	
 	if ( checkRequest(resourceIndex, requestingPid) == 1 )
 	{
-		printf("resourceIndex: %d\n", resourceIndex);
 		pcb[index].CurrentResource[resourceIndex] = pcb[index].CurrentResource[resourceIndex] + 1;
 		resourceDescriptor[resourceIndex].AllocatedResources = resourceDescriptor[resourceIndex].AllocatedResources + 1;
 		resourceDescriptor[resourceIndex].AvailableResources = resourceDescriptor[resourceIndex].AvailableResources - 1;
@@ -270,8 +314,6 @@ int checkRequest(int resourceIndex, pid_t requestingPid)
 		for ( j = 0; j < NUM_DIFF_RESOURCES; ++j )
 		{
 			processNeeds[i][j] = pcb[i].MaxResource[j] - pcb[i].CurrentResource[j];
-//			if (processNeeds[i][j] < 0)
-//			printf("curr: %d max: %d\n", pcb[i].CurrentResource[j], pcb[i].MaxResource[j]);
 		}
 	}
 
@@ -305,7 +347,6 @@ int checkRequest(int resourceIndex, pid_t requestingPid)
 						int resourceNum, hasEnoughResources = 1;
 						for ( resourceNum = 0; resourceNum < NUM_DIFF_RESOURCES && hasEnoughResources == 1; ++resourceNum )
 						{
-//							printf("needs: [%d][%d] %d tempAvailable: %d\n", processNum, resourceNum, processNeeds[processNum][resourceNum], tempAvailable[resourceNum]);
 							if ( processNeeds[processNum][resourceNum] > tempAvailable[resourceNum] )
 								hasEnoughResources = 0;
 						}

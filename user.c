@@ -29,6 +29,7 @@
 #define MAX_INTERNAL_SECONDS 8
 #define ACTION_TIME_BOUND 10000
 #define ACTION_TYPES 2
+#define MAX_PERCENT 100
 
 // Global definitions
 // Pointer to shared global seconds integer
@@ -93,7 +94,6 @@ int main(int argc, char** argv)
 void mainUserLoop()
 {
 	int pcbIndex = findProcessInPcb( getpid() );
-printf("PCB index for %d: %d\n", pcbIndex, getpid());
 	int nextActionNanoSeconds = rand() % ACTION_TIME_BOUND;
 
 	mymsg_t clockMsg;
@@ -161,8 +161,9 @@ printf("PCB index for %d: %d\n", pcbIndex, getpid());
 			
 			if ( msgrcv(msgIdGrant, &msgGrant, sizeof(msgGrant), getpid(), 0) == -1 )
 				writeError("Failed to receive message granting resource\n", processName);
-			
-			finishedExecution = 1;
+
+			if (rand() % MAX_PERCENT < 10)		
+				finishedExecution = 1;
 		}
 	}
 }
