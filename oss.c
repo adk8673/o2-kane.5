@@ -398,8 +398,8 @@ int checkRequest(int resourceIndex, pid_t requestingPid)
 	}
 
 	// simulate the state if were to give the requested resource
-	--tempAvailable[resourceIndex];
-	--processNeeds[pcbIndex][resourceIndex];	
+	tempAvailable[resourceIndex] = tempAvailable[resourceIndex] - 1;
+	processNeeds[pcbIndex][resourceIndex] = processNeeds[pcbIndex][resourceIndex] - 1;	
 
 	int* processFinish = malloc(sizeof(int) * maxNumProcesses);
 
