@@ -30,9 +30,10 @@
 #define ID_MSG_CLOCK 5
 #define ID_PCB 6
 #define ID_MSG_GRANT 7
+#define ID_MSG_RELEASE 8
 #define NUM_DIFF_RESOURCES 20
 #define MAX_RESOURCE_COUNT 10
-#define MAX_NUM_PROCESSES 2
+#define MAX_NUM_PROCESSES 18
 #define NANO_PER_SECOND 1000000000
 #define MAX_SPAWN_NANO 100000
 #define MAX_INTERNAL_SECONDS 8
@@ -73,6 +74,9 @@ int msgIdClock = 0;
 
 // Message queue ID for granting resource requests
 int msgIdGrant = 0;
+
+// Message queue ID for releasing resources
+int msgIdRelease = 0;
 
 // Process name
 char* processName = NULL;
@@ -162,6 +166,9 @@ int main(int argc, char** argv)
 
 void executeOss()
 {
+
+	ossLog = fopen("oss.log", "w");
+	
 	// populate our resource descriptor array with random resource counts
 	initializeResourceDescriptor();	
 
@@ -171,12 +178,11 @@ void executeOss()
 	int spawnSeconds = 0;
 	int spawnNanoSeconds = 0;
 
-	ossLog = fopen("oss.log", "w");
-
 	pcbOccupied = malloc(sizeof(int) * maxNumProcesses);
 	blockedQueue = malloc(sizeof(pid_t) * maxNumProcesses);
+	initializeQueue(blockedQueue, MAX_NUM_PROCESSES);
 
-	mymsg_t requestMsg, clockMsg;
+	mymsg_t requestMsg, clockMsg, releaseMsg;
 	
 	// need to allow access to critical section with one initial message
 	clockMsg.mtype = 1;
@@ -186,11 +192,68 @@ void executeOss()
 	while( *seconds <= MAX_INTERNAL_SECONDS )
 	{
 		spawnProcess( &spawnSeconds, &spawnNanoSeconds );
-		
+
+		checkQueue();
+
 		while ( msgrcv( msgIdRequest, &requestMsg, sizeof(requestMsg), 0, IPC_NOWAIT) > 0 )
 		{
 			printf("Received request from child %d\n", requestMsg.mtype);
-			processResourceRequest(	requestMsg );
+			
+			if ( strcmp(requestMsg.mtext, "END") == 0 )
+			{
+				// if a child finished, make sure to wait on it or it won't be fully removed
+				int status;
+				waitpid(requestMsg.mtype, &status, 0); 
+
+				// Next - free up it's resources since it's over
+				int index = findProcessInPcb(requestMsg.mtype);
+				
+				int i;
+				for ( i = 0; i < NUM_DIFF_RESOURCES; ++i )
+				{
+					if ( pcb[index].CurrentResource > 0 )
+					{
+						resourceDescriptor[i].AvailableResources += pcb[index].CurrentResource[i];
+						pcb[index].CurrentResource[i] = 0;
+						pcb[index].MaxResource[i] = 0;
+					}
+				}
+				
+				pcb[index].ProcessId = 0;
+				pcb[index].BlockedResource = 0;
+				pcbOccupied[index] = 0;
+
+			}
+			else
+			{
+				processResourceRequest(	requestMsg );
+			}
+		}
+
+		while ( msgrcv( msgIdRelease, &releaseMsg, sizeof(releaseMsg), 0, IPC_NOWAIT) > 0 )
+		{
+			int resourceIndex = atoi(releaseMsg.mtext);
+			printf("Child %d wants to release resource %d\n", releaseMsg.mtype, resourceIndex);
+
+			int index = findProcessInPcb(releaseMsg.mtype);
+			if ( pcb[index].CurrentResource[resourceIndex] > 0 )
+			{
+				if ( ossLog != NULL && linesWritten < MAX_LINES_WRITE)
+				{
+					fprintf(ossLog, "Child %d about to release resource R%d\n", releaseMsg.mtype, resourceIndex);
+					++linesWritten;
+				}
+
+				resourceDescriptor[resourceIndex].AvailableResources += 1;
+				pcb[index].CurrentResource[resourceIndex] -= 1;
+
+				writeCurrentAllocationToLog();	
+			}
+
+			mymsg_t grantMsg;
+			grantMsg.mtype = releaseMsg.mtype;
+			if ( msgsnd(msgIdGrant, &grantMsg, sizeof(grantMsg), 0) == -1 )
+				writeError("Failed to send confirmation to child\n", processName);
 		}
 
 		int increment = rand() % TIME_INCREMENT;
@@ -220,7 +283,9 @@ void checkQueue()
 {
 	pid_t* tempQueue = malloc(sizeof(pid_t) * maxNumProcesses);
 	pid_t blockedPid = dequeueValue(blockedQueue, maxNumProcesses);
-	
+
+	initializeQueue(tempQueue, MAX_NUM_PROCESSES);
+
 	while ( blockedPid != 0 )
 	{
 		int index = findProcessInPcb(blockedPid);
@@ -249,7 +314,9 @@ void checkQueue()
 		else 
 		{
 			enqueueValue(tempQueue, blockedPid, maxNumProcesses);
-		}	
+		}
+		
+		blockedPid = dequeueValue(blockedQueue, maxNumProcesses);	
 	}
 
 	blockedPid = dequeueValue(tempQueue, maxNumProcesses);
@@ -278,6 +345,12 @@ void processResourceRequest(mymsg_t requestMsg)
 		resourceDescriptor[resourceIndex].AllocatedResources = resourceDescriptor[resourceIndex].AllocatedResources + 1;
 		resourceDescriptor[resourceIndex].AvailableResources = resourceDescriptor[resourceIndex].AvailableResources - 1;
 
+		if ( ossLog != NULL && linesWritten < MAX_LINES_WRITE )
+		{
+			fprintf(ossLog, "Child %d was granted resource %d\n", pcb[index].ProcessId, resourceIndex);
+			++linesWritten;
+		}
+
 		mymsg_t grantMsg;
 		grantMsg.mtype = requestingPid;
 	
@@ -288,6 +361,13 @@ void processResourceRequest(mymsg_t requestMsg)
 	}
 	else
 	{
+		if ( ossLog != NULL && linesWritten < MAX_LINES_WRITE )
+		{
+			fprintf(ossLog, "Child %d was blocked on resource %d\n", pcb[index].ProcessId, resourceIndex);
+			++linesWritten;
+		}
+		
+		printf("Child %d became blocked on resource R%d\n", requestingPid, resourceIndex);
 		pcb[index].BlockedResource = resourceIndex;
 		enqueueValue(blockedQueue, requestingPid, maxNumProcesses);	
 	}
@@ -396,15 +476,18 @@ void writeCurrentAllocationToLog()
 
 		for ( i = 0; i < maxNumProcesses; ++i)
 		{
-			fprintf(ossLog, "P%d\t", i);
-			int j;
-			for ( j = 0; j < NUM_DIFF_RESOURCES; ++j)
+			if (pcb[i].ProcessId != 0)
 			{
-				fprintf(ossLog, "%d\t", pcb[i].CurrentResource[j]);
-			}
+				fprintf(ossLog, "P%d\t", i);
+				int j;
+				for ( j = 0; j < NUM_DIFF_RESOURCES; ++j)
+				{
+					fprintf(ossLog, "%d\t", pcb[i].CurrentResource[j]);
+				}
 
-			fprintf(ossLog, "\n");
-			++linesWritten;
+				fprintf(ossLog, "\n");
+				++linesWritten;
+			}
 		}
 	}
 }
@@ -534,29 +617,65 @@ void allocateAllMessageQueue()
 	msgIdRequest = allocateMessageQueue(ID_MSG_REQUEST, processName);
 	msgIdClock = allocateMessageQueue(ID_MSG_CLOCK, processName);
 	msgIdGrant = allocateMessageQueue(ID_MSG_GRANT, processName);
+	msgIdRelease = allocateMessageQueue(ID_MSG_RELEASE, processName);
 }
 
 void deallocateAllMessageQueue()
 {
-	if (msgIdRequest > 0)
+	if ( msgIdRequest > 0 )
 		deallocateMessageQueue(msgIdRequest, processName);
 
-	if (msgIdClock > 0)
+	if ( msgIdClock > 0 )
 		deallocateMessageQueue(msgIdClock, processName);
 
-	if (msgIdGrant > 0)
+	if ( msgIdGrant > 0 )
 		deallocateMessageQueue(msgIdGrant, processName);
+
+	if ( msgIdRelease > 0 )
+		deallocateMessageQueue(msgIdRelease, processName);
 }
 
 void initializeResourceDescriptor()
 {
+	if ( ossLog != NULL && linesWritten < MAX_LINES_WRITE )
+	{
+		fprintf(ossLog, "Intial Resources\n");
+		++linesWritten;
+		
+		fprintf(ossLog, "\t");
+		int i;
+		for ( i = 0; i < NUM_DIFF_RESOURCES; ++i )
+		{
+			fprintf(ossLog, "R%d\t", i);
+		}
+
+		fprintf(ossLog, "\n");
+		++linesWritten;
+	}
+
+	if ( ossLog != NULL && linesWritten < MAX_LINES_WRITE )
+	{
+		fprintf( ossLog, "Num:\t");
+	}
+
 	int i;
-	for (i = 0; i < NUM_DIFF_RESOURCES; ++i)
+	for ( i = 0; i < NUM_DIFF_RESOURCES; ++i)
 	{
 		resourceDescriptor[i].TotalResources = (rand() % MAX_RESOURCE_COUNT) + 1;
 		resourceDescriptor[i].AvailableResources = resourceDescriptor[i].TotalResources;
 		resourceDescriptor[i].AllocatedResources = 0;
+
+		if ( ossLog != NULL && linesWritten < MAX_LINES_WRITE )
+		{
+			fprintf(ossLog, "%d\t", resourceDescriptor[i].TotalResources);
+		}
 	} 
+
+	if ( ossLog != NULL && linesWritten < MAX_LINES_WRITE)
+	{
+		fprintf(ossLog, "\n");
+		+linesWritten;
+	}
 }
 
 void handleInterruption(int signo)

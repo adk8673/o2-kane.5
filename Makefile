@@ -1,6 +1,6 @@
 CC=gcc
 OSS_OBJECTS=oss.o IPCUtilities.o ErrorLogging.o ProcessUtilities.o PeriodicTimer.o StringUtilities.o QueueUtilities.o 
-USER_OBJECTS=user.o IPCUtilities.o ErrorLogging.o
+USER_OBJECTS=user.o IPCUtilities.o ErrorLogging.o PeriodicTimer.o
 LINKEDLBS=-lrt
 CFLAGS=-w
 

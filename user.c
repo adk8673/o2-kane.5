@@ -11,6 +11,7 @@
 #include<time.h>
 #include"ErrorLogging.h"
 #include"IPCUtilities.h"
+#include"PeriodicTimer.h"
 #include"ProcessControlBlock.h"
 #include"ResourceDescriptor.h"
 
@@ -21,14 +22,15 @@
 #define ID_MSG_CLOCK 5
 #define ID_PCB 6
 #define ID_MSG_GRANT 7
+#define ID_MSG_RELEASE 8
 #define NUM_DIFF_RESOURCES 20
 #define MAX_RESOURCE_COUNT 10
-#define MAX_NUM_PROCESSES 2
+#define MAX_NUM_PROCESSES 18
 #define NANO_PER_SECOND 1000000000
 #define MAX_SPAWN_NANO 100000
 #define MAX_INTERNAL_SECONDS 8
 #define ACTION_TIME_BOUND 10000
-#define ACTION_TYPES 2
+#define ACTION_TYPES 3
 #define MAX_PERCENT 100
 
 // Global definitions
@@ -65,6 +67,9 @@ int msgIdClock = 0;
 // Message queue ID for granting requests
 int msgIdGrant = 0;
 
+// Message queue id for release reasources
+int msgIdRelease = 0;
+
 // Process name
 char* processName = NULL;
 
@@ -76,12 +81,18 @@ typedef struct {
 
 void attachToExistingIPC();
 void dettachFromExistingIPC();
+void handleTimer(int);
 
 int main(int argc, char** argv)
 {
+	srand(time(0) * getpid());
 	processName = argv[0];
 	printf("Beginning execution of child %d\n", getpid());	
 	
+	// kill this child in case it outlives parent
+	setPeriodic(4);
+	signal(SIGALRM, handleTimer);
+
 	attachToExistingIPC();
 
 	mainUserLoop();
@@ -117,6 +128,7 @@ void mainUserLoop()
 	while ( !finishedExecution )
 	{
 		int resourceIndex = -1;
+		int release = 0;
 		if ( msgrcv(msgIdClock, &clockMsg, sizeof(clockMsg), 0, 0) == -1 )
 			writeError("Failed to receive message to access critical sections\n", processName);
 
@@ -124,15 +136,35 @@ void mainUserLoop()
 		{
 			int action = rand() % ACTION_TYPES;
 
-			if ( action == 1 || action == 0 )
-			{	
+			if ( action == 0 || action == 1 )
+			{
 				resourceIndex = rand() % NUM_DIFF_RESOURCES;
-					
-				if ( pcb[pcbIndex].CurrentResource[resourceIndex] >= pcb[pcbIndex].MaxResource[resourceIndex] )
-					resourceIndex = -1;
-
+				
+				if ( action == 0 )	
+				{
+					if ( pcb[pcbIndex].CurrentResource[resourceIndex] >= pcb[pcbIndex].MaxResource[resourceIndex] )
+						resourceIndex = -1;
+				}
+				else
+				{
+					if ( pcb[pcbIndex].CurrentResource[resourceIndex] <= 0 )
+					{
+						resourceIndex = -1;
+					}
+					else
+					{
+						release = 1;
+					}
+				}
 			}
-
+			else
+			{
+				if (rand() % MAX_PERCENT < 10)
+				{
+					finishedExecution = resourceIndex = 1;
+				}
+			}
+			
 			actionNanoSeconds = *nanoSeconds + nextActionNanoSeconds;
 			actionSeconds = *seconds;	
 
@@ -149,21 +181,40 @@ void mainUserLoop()
 
 		if ( resourceIndex != -1 )
 		{
-			printf("Child %d about to request resource %d\n", getpid(), resourceIndex);
-			mymsg_t msgRequest;
+			mymsg_t msgGrant, msgRequest;
 			msgRequest.mtype = getpid();
 			
-			snprintf(msgRequest.mtext, 50, "%d", resourceIndex);
-	
-			if ( msgsnd(msgIdRequest, &msgRequest, sizeof(msgRequest), 0) == -1 )
-				writeError("Failed to send message requesting resource\n", processName);
-			mymsg_t msgGrant;
-			
-			if ( msgrcv(msgIdGrant, &msgGrant, sizeof(msgGrant), getpid(), 0) == -1 )
-				writeError("Failed to receive message granting resource\n", processName);
+			if ( finishedExecution != 1 )
+			{
+				snprintf(msgRequest.mtext, 50, "%d", resourceIndex);
 
-			if (rand() % MAX_PERCENT < 10)		
-				finishedExecution = 1;
+				if ( release == 1 )
+				{
+					if ( msgsnd(msgIdRelease, &msgRequest, sizeof(msgRequest), 0) == -1 )
+						writeError("Failed to send message release resource\n", processName);
+					
+					if ( msgrcv(msgIdGrant, &msgGrant, sizeof(msgGrant), getpid(), 0) == -1 )
+						writeError("Failed to receive confirmation from oss\n", processName);
+				}
+				else	
+				{
+					if ( msgsnd(msgIdRequest, &msgRequest, sizeof(msgRequest), 0) == -1 )
+						writeError("Failed to send message requesting resource\n", processName);
+					
+								
+					if ( msgrcv(msgIdGrant, &msgGrant, sizeof(msgGrant), getpid(), 0) == -1 )
+						writeError("Failed to receive message granting resource\n", processName);
+				}
+				
+			}
+			else
+			{
+				snprintf(msgRequest.mtext, 50, "END");
+				
+				if ( msgsnd(msgIdRelease, &msgRequest, sizeof(msgRequest), 0) == -1 )
+						writeError("Failed to send message release resource\n", processName);
+
+			}
 		}
 	}
 }
@@ -196,6 +247,7 @@ void attachToExistingIPC()
 	msgIdRequest = getExistingMessageQueue(ID_MSG_REQUEST, processName);
 	msgIdClock = getExistingMessageQueue(ID_MSG_CLOCK, processName);
 	msgIdGrant = getExistingMessageQueue(ID_MSG_GRANT, processName);
+	msgIdRelease = getExistingMessageQueue(ID_MSG_RELEASE, processName);
 }
 
 void dettachFromExistingIPC()
@@ -222,5 +274,13 @@ void dettachFromExistingIPC()
 	{
 		if ( shmdt(pcb) == -1 )
 			writeError("Failed to dettach from pcb\n", processName);
+	}
+}
+
+void handleTimer(int signo)
+{
+	if (signo == SIGALRM)
+	{
+		kill(getpid(), SIGKILL);
 	}
 }
