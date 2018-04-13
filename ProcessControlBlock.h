@@ -26,6 +26,15 @@ typedef struct {
 
 	// Blocked on resource
 	int BlockedResource;
+
+	// Blocked at seconds
+	int BlockedAtSeconds;
+
+	// Blocked at nanoseconds
+	int BlockedAtNanoSeconds;
+
+	// Total blocked nanoseconds
+	long BlockedNanoSeconds;
 } ProcessControlBlock;
 
 #endif

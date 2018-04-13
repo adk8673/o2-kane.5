@@ -40,6 +40,7 @@
 #define MAX_NEEDED_RESOURCE 6
 #define TIME_INCREMENT 5000
 #define MAX_LINES_WRITE 10000
+#define WRITE_ALLOCATION_COUNT 20
 
 // Global definitions
 // Pointer to shared global seconds integer
@@ -105,6 +106,24 @@ FILE* ossLog = NULL;
 // Lines written
 int linesWritten = 0;
 
+// Verbose flag
+int verboseFlag = 0;
+
+// Total granted requests
+int totalGrantedRequests = 0;
+
+// Granted requests up to write max
+int grantedRequests = 0;
+
+// Total check counts
+int totalResourceChecks = 0;
+
+// Total wait nano seconds
+long nanoSecondsWait = 0;
+
+// Total Processes spawned
+int totalProcessesCount = 0;
+
 void allocateAllSharedMemory();
 void deallocateAllSharedMemory();
 void handleInterruption( int );
@@ -119,6 +138,7 @@ int findProcessInPcb( pid_t );
 void incrementClock( int );
 int checkRequest( int, pid_t );
 void writeCurrentAllocationToLog();
+void printStatistics();
 
 int main(int argc, char** argv)
 {
@@ -159,6 +179,8 @@ int main(int argc, char** argv)
 	deallocateAllSharedMemory();
 	deallocateAllMessageQueue();
 
+	printStatistics();
+
 	printf("Exiting execution of oss\n");
 
 	return 0;
@@ -194,7 +216,7 @@ void executeOss()
 		spawnProcess( &spawnSeconds, &spawnNanoSeconds );
 
 		checkQueue();
-
+		
 		while ( msgrcv( msgIdRequest, &requestMsg, sizeof(requestMsg), 0, IPC_NOWAIT) > 0 )
 		{
 			printf("Received request from child %d\n", requestMsg.mtype);
@@ -204,7 +226,7 @@ void executeOss()
 				// if a child finished, make sure to wait on it or it won't be fully removed
 				int status;
 				waitpid(requestMsg.mtype, &status, 0); 
-
+				
 				// Next - free up it's resources since it's over
 				int index = findProcessInPcb(requestMsg.mtype);
 				
@@ -218,7 +240,9 @@ void executeOss()
 						pcb[index].MaxResource[i] = 0;
 					}
 				}
-				
+			
+				nanoSecondsWait += (((*seconds) * NANO_PER_SECOND) + *nanoSeconds) - ((pcb[index].BlockedAtSeconds * NANO_PER_SECOND) + pcb[index].BlockedAtNanoSeconds);
+	
 				pcb[index].ProcessId = 0;
 				pcb[index].BlockedResource = 0;
 				pcbOccupied[index] = 0;
@@ -240,7 +264,7 @@ void executeOss()
 			{
 				if ( ossLog != NULL && linesWritten < MAX_LINES_WRITE)
 				{
-					fprintf(ossLog, "Child %d about to release resource R%d\n", releaseMsg.mtype, resourceIndex);
+					fprintf(ossLog, "Child %d about to release resource R%d at %d:%d\n", releaseMsg.mtype, resourceIndex, *seconds, *nanoSeconds);
 					++linesWritten;
 				}
 
@@ -279,10 +303,22 @@ void executeOss()
 		fclose(ossLog);
 }
 
+void printStatistics()
+{
+	printf("Statistics:\nTotal Resource Checks: %d\nTotal Granted Resouces: %d\nPercentage granted: %lf\nTotal Waiting time: %d\nAverage waiting time: %d\n"
+	,totalResourceChecks
+	,totalGrantedRequests
+	,((double)totalGrantedRequests/(double)totalResourceChecks) * (double)100
+	,nanoSecondsWait
+	,nanoSecondsWait / totalProcessesCount);
+}
+
 void checkQueue()
 {
 	pid_t* tempQueue = malloc(sizeof(pid_t) * maxNumProcesses);
 	pid_t blockedPid = dequeueValue(blockedQueue, maxNumProcesses);
+
+	++totalResourceChecks;
 
 	initializeQueue(tempQueue, MAX_NUM_PROCESSES);
 
@@ -305,11 +341,26 @@ void checkQueue()
 			
 			if ( ossLog != NULL && linesWritten < MAX_LINES_WRITE )
 			{
-				fprintf(ossLog, "Child %d was removed from block queue after waiting for resource %d", blockedPid, resourceIndex);
+				fprintf(ossLog, "Child %d was removed from blocked queue at %d:%d after waiting for resource %d\n", blockedPid, *seconds, *nanoSeconds, resourceIndex);
+				++linesWritten;
 			}
 
-			writeCurrentAllocationToLog();
-
+			++totalGrantedRequests;
+			++grantedRequests;
+		
+			nanoSecondsWait += (((*seconds) * NANO_PER_SECOND) + *nanoSeconds) - ((pcb[index].BlockedAtSeconds * NANO_PER_SECOND) + pcb[index].BlockedAtNanoSeconds);
+			pcb[index].BlockedResource = 0;
+			pcb[index].BlockedAtNanoSeconds = 0;
+			pcb[index].BlockedAtSeconds = 0;
+	
+			if ( grantedRequests == 20 )
+			{
+				writeCurrentAllocationToLog();
+				grantedRequests = 0;
+			}
+			
+			int timeIncrement = rand() % TIME_INCREMENT;
+			incrementClock(timeIncrement);
 		}
 		else 
 		{
@@ -347,7 +398,7 @@ void processResourceRequest(mymsg_t requestMsg)
 
 		if ( ossLog != NULL && linesWritten < MAX_LINES_WRITE )
 		{
-			fprintf(ossLog, "Child %d was granted resource %d\n", pcb[index].ProcessId, resourceIndex);
+			fprintf(ossLog, "Child %d was granted resource %d at %d:%d\n", pcb[index].ProcessId, resourceIndex, *seconds, *nanoSeconds);
 			++linesWritten;
 		}
 
@@ -356,19 +407,28 @@ void processResourceRequest(mymsg_t requestMsg)
 	
 		if ( msgsnd(msgIdGrant, &grantMsg, sizeof(grantMsg), 0) == -1 )
 			writeError("Failed to send grant message to child\n", processName);
+		
+		++grantedRequests;
+		++totalGrantedRequests;
 
-		writeCurrentAllocationToLog();
+		if ( grantedRequests == 20 )
+		{
+			writeCurrentAllocationToLog();
+			grantedRequests = 0;
+		}
 	}
 	else
 	{
 		if ( ossLog != NULL && linesWritten < MAX_LINES_WRITE )
 		{
-			fprintf(ossLog, "Child %d was blocked on resource %d\n", pcb[index].ProcessId, resourceIndex);
+			fprintf(ossLog, "Child %d was blocked on resource R%d at %d:%d\n", pcb[index].ProcessId, resourceIndex, *seconds, *nanoSeconds);
 			++linesWritten;
 		}
 		
 		printf("Child %d became blocked on resource R%d\n", requestingPid, resourceIndex);
 		pcb[index].BlockedResource = resourceIndex;
+		pcb[index].BlockedAtSeconds = *seconds;
+		pcb[index].BlockedAtNanoSeconds = *nanoSeconds;
 		enqueueValue(blockedQueue, requestingPid, maxNumProcesses);	
 	}
 }
@@ -459,7 +519,9 @@ int checkRequest(int resourceIndex, pid_t requestingPid)
 
 void writeCurrentAllocationToLog()
 {
-	if (ossLog != NULL && linesWritten < MAX_LINES_WRITE)
+	if (ossLog != NULL 
+		&& linesWritten < MAX_LINES_WRITE
+		&& verboseFlag == 1)
 	{
 		fprintf(ossLog, "Total resource allocation: \n");
 		++linesWritten;
@@ -544,7 +606,8 @@ void spawnProcess(int* spawnSeconds, int* spawnNanoSeconds)
 			return;
 		
 		pid_t newChild = createChildProcess("./user", processName);
-
+		
+		++totalProcessesCount;
 		pcbOccupied[index] = 1;
 		pcb[index].ProcessId = newChild;
 		
@@ -587,12 +650,12 @@ void spawnProcess(int* spawnSeconds, int* spawnNanoSeconds)
 void checkCommandArgs(int argc, char** argv)
 {
 	int c;
-	while ((c = getopt(argc, argv, "hn:")) != -1)
+	while ((c = getopt(argc, argv, "vhn:")) != -1)
 	{
 		switch (c)
 		{
 			case 'h':
-				printf("oss (second iteration):\nWhen ran (using the option ./oss), \n");
+				printf("oss (second iteration):\nWhen ran (using the option ./oss), simulates the management of resource allocation of several children by a master process \nThe following options may be used:\n-h\tDisplay help\n-n\tNumber of processes to spawn at max (cannot be greater than 18)\n-v\tVerbose log setting\n");
 				exit(0);
 				break;	
 			case 'n':
@@ -605,6 +668,8 @@ void checkCommandArgs(int argc, char** argv)
 				else
 					printf("Invalid number of max children, will use default of %d\n", MAX_NUM_PROCESSES);
 				break;
+			case 'v':
+				verboseFlag = 1;
 			default:
 				break;
 		}
@@ -682,6 +747,16 @@ void handleInterruption(int signo)
 {
 	if (signo == SIGINT || signo == SIGALRM)
 	{
+
+		int i;
+		for ( i = 0; i < maxNumProcesses; ++i )
+		{
+			if ( pcb[i].ProcessId != 0 && pcb[i].BlockedResource )
+				nanoSecondsWait += (((*seconds) * NANO_PER_SECOND) + *nanoSeconds) - ((pcb[i].BlockedAtSeconds * NANO_PER_SECOND) + pcb[i].BlockedAtNanoSeconds);
+		}
+		
+		printStatistics();
+
 		deallocateAllSharedMemory();
 		deallocateAllMessageQueue();
 	

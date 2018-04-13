@@ -1,3 +1,7 @@
+// user.c
+// Main code for user processes
+// 4/12/2018
+// Project 4
 #include<unistd.h>
 #include<math.h>
 #include<signal.h>
@@ -159,7 +163,7 @@ void mainUserLoop()
 			}
 			else
 			{
-				if (rand() % MAX_PERCENT < 10)
+				if ((rand() % MAX_PERCENT) < 10)
 				{
 					finishedExecution = resourceIndex = 1;
 				}

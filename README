@@ -1,0 +1,16 @@
+./oss
+
+Project 4
+Alex Kane 4/12/2018
+
+This project simulates the execution of a operating system that manages the allocation of scarce resources to several child processes.  The bankers algorithm is carried out on every request to detect if a request will cause the system to enter an unsafe state.
+
+The parent should terminate after 2 seconds.  Children are set to terminate after 4 seconds, in the case that they are not properly killed by oss.
+
+The program may be executed using ./oss.  ./oss -v causes verbose loggint to be used instead.
+
+Children processes don't always seem to be terminating correctly.
+
+The project commit log can be found at:
+
+https://github.com/adk8673/o2-kane.5
